@@ -16,8 +16,8 @@ Request timeouts are enforced and do cancel DB queries, but otherwise
 it relies on PostgreSQL for access permissions and security policies,
 as well as for any business logic that may be needed.
 
-It is based on WAI, and can be used with CGI, socket activation, Unix
-domain sockets, or as a standalone HTTP server.
+It is based on WAI, and can be used with (S,Fast)CGI, or various other
+methods.
 
 
 ## Usage
@@ -74,8 +74,28 @@ This is intended to be used with an HTTP server, which would take care
 of encryption, compression, static files, redirects, and so on, while
 pgxhtml only focuses on providing a web interface to a database.
 
+### Security checklist
+
+- Regular privileges (see
+  [GRANT](https://www.postgresql.org/docs/current/sql-grant.html))
+  should be set appropriately.
+
+- [Row Security
+  Policies](https://www.postgresql.org/docs/current/ddl-rowsecurity.html)
+  should be defined and enabled.
+
+- [Constraints](https://www.postgresql.org/docs/current/ddl-constraints.html)
+  are useful for data validation.
+
+- [REVOKE CREATE ON SCHEMA public FROM
+  PUBLIC](https://www.postgresql.org/docs/current/ddl-schemas.html)
+  would likely be desired (perhaps granting `CREATE` just to the
+  database owner/administrators).
 
 ## See also
 
-[PostgREST](http://postgrest.org/), "a standalone web server that
-turns your PostgreSQL database directly into a RESTful API".
+- [PostgREST](http://postgrest.org/), "a standalone web server that
+  turns your PostgreSQL database directly into a RESTful API".
+
+- [automatic-api](https://github.com/dbohdan/automatic-api/), a list
+  of tools for automatic HTTP-based API generation.
