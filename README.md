@@ -41,7 +41,7 @@ URL query parameters are made visible to XSLTs as `xsl:param`
 parameters. The documents they get applied to are either the results
 of SQL queries (which are expected to return a single XML document,
 using `query_to_xml` or similar functions), or error documents (which
-contain error details) in case of an SQL error.
+contain error details) in case of an error.
 
 The XSLTs are taken from `XSLT_DIR`, using file name from the URL
 query, with its extension changed to `xsl`.

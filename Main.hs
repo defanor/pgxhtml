@@ -62,7 +62,7 @@ import Network.Wai.Middleware.Timeout (timeout)
 import Network.Wai.Cli (defWaiMain)
 import Control.Monad (join)
 import Control.Arrow ((***))
-import Control.Exception (bracket, finally, handle)
+import Control.Exception (bracket, finally, catches, Handler(..))
 import System.FilePath (replaceExtension, takeFileName, (</>))
 import System.Envy (decodeEnv, FromEnv(..), envMaybe, (.!=))
 
@@ -139,8 +139,11 @@ makeParams = M.fromList . mapMaybe makeParam
                                      , LiteralExpr (BS.unpack v))
         makeParam _ = Nothing
 
-errorXML :: PT.Query -> [Action] -> SqlError -> XmlTree
-errorXML q p e = mkRoot []
+mkAttr :: String -> String -> XmlTree
+mkAttr k v = mkTree (XAttr $ mkName k) [mkTree (XText v) []]
+
+sqlErrorXML :: PT.Query -> [Action] -> SqlError -> XmlTree
+sqlErrorXML q p e = mkRoot []
   [mkTree (XTag (mkName "sql_error")
             [ mkAttr "template" (show q)
             , mkAttr "parameters" (show p)
@@ -151,7 +154,24 @@ errorXML q p e = mkRoot []
             , mkAttr "hint" (BS.unpack $ sqlErrorHint e)
             ])
     []]
-  where mkAttr k v = mkTree (XAttr $ mkName k) [mkTree (XText v) []]
+
+-- todo: perhaps encode parameters separately, as an array
+formatErrorXML :: FormatError -> XmlTree
+formatErrorXML (FormatError m (PT.Query q) p) = mkRoot []
+  [mkTree (XTag (mkName "format_error")
+            [ mkAttr "message" m
+            , mkAttr "query" (BS.unpack q)
+            , mkAttr "params" (show p)
+            ])
+    []]
+
+queryErrorXML :: QueryError -> XmlTree
+queryErrorXML (QueryError m (PT.Query q)) = mkRoot []
+  [mkTree (XTag (mkName "query_error")
+            [ mkAttr "message" m
+            , mkAttr "query" (BS.unpack q)
+            ])
+    []]
 
 serve :: EnvConfig -> IO Connection -> Application
 serve conf ioc req respond = do
@@ -174,7 +194,11 @@ serve conf ioc req respond = do
                 [(hContentType, "application/xhtml+xml")]
                 (fromString $ concat $
                  "<?xml version=\"1.0\"?>\n" : "<!DOCTYPE html>\n" : rc)
-        handle (resp badRequest400 . errorXML q' params)
+        flip catches [ Handler $ resp badRequest400 . sqlErrorXML q' params
+                     , Handler $ resp badRequest400 . formatErrorXML
+                     , Handler $ resp badRequest400 . queryErrorXML
+                     -- todo: handle ResultError as well
+                     ]
           $ bracket ioc cancelAndClose $ \c -> do
           r <- query c q' params
           case r of
