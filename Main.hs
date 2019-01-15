@@ -45,14 +45,12 @@ import Database.PostgreSQL.Simple.Internal (withConnection)
 import Database.PostgreSQL.LibPQ (getCancel, cancel)
 import Text.XML.HXT.Core
   (IOSArrow, replaceChildren, arrL, ($<), constA, runX,
-   writeDocumentToString, withOutputXHTML, withIndent, stringTrim,
-   XNode(..), mkName)
-import Text.XML.HXT.DOM.XmlNode (mkRoot)
+   writeDocumentToString, withOutputXHTML, withIndent, stringTrim, mkQName)
+import Text.XML.HXT.DOM.XmlNode (mkRoot, mkElement, mkText)
 import Text.XML.HXT.Parser.XmlParsec (xreadDoc)
 import Text.XML.HXT.XSLT.Application (XPathParams, applyStylesheetWParams)
 import Text.XML.HXT.XSLT.XsltArrows (xsltCompileStylesheetFromURI)
 import Text.XML.HXT.XSLT.Common (XmlTree, ExName(..), Expr(..), (>>>))
-import Data.Tree.Class (mkTree)
 import Data.String (fromString)
 import Data.Maybe (mapMaybe)
 import Data.Text.Encoding (encodeUtf8)
@@ -88,6 +86,12 @@ data EnvConfig = EnvConfig
 instance FromEnv EnvConfig where
   fromEnv =
     EnvConfig <$> envMaybe "TIMEOUT" .!= 10 <*> envMaybe "XSLT_DIR" .!= ""
+
+data Error = ESQL SqlError
+           | EFormat FormatError
+           | EQuery QueryError
+           | EResult ResultError
+           | EOther String
 
 formToFields :: Form -> [(T.Text, T.Text)]
 formToFields = mapMaybe toField . HM.toList . unForm
@@ -139,73 +143,63 @@ makeParams = M.fromList . mapMaybe makeParam
                                      , LiteralExpr (BS.unpack v))
         makeParam _ = Nothing
 
-mkAttr :: String -> String -> XmlTree
-mkAttr k v = mkTree (XAttr $ mkName k) [mkTree (XText v) []]
+mkError :: String -> [(String, String)] -> XmlTree
+mkError t kv = mkRoot [] . pure $
+  mkElement (mkQName "px" t nsURI) [] $
+  map (\(k,v) -> mkElement (mkQName "px" k nsURI) [] [mkText v]) kv
+  where
+    nsURI = "urn:x-pgxhtml"
 
-sqlErrorXML :: PT.Query -> [Action] -> SqlError -> XmlTree
-sqlErrorXML q p e = mkRoot []
-  [mkTree (XTag (mkName "sql_error")
-            [ mkAttr "template" (show q)
-            , mkAttr "parameters" (show p)
-            , mkAttr "state" (BS.unpack $ sqlState e)
-            , mkAttr "status" (show $ sqlExecStatus e)
-            , mkAttr "message" (BS.unpack $ sqlErrorMsg e)
-            , mkAttr "detail" (BS.unpack $ sqlErrorDetail e)
-            , mkAttr "hint" (BS.unpack $ sqlErrorHint e)
-            ])
-    []]
-
--- todo: perhaps encode parameters separately, as an array
-formatErrorXML :: FormatError -> XmlTree
-formatErrorXML (FormatError m (PT.Query q) p) = mkRoot []
-  [mkTree (XTag (mkName "format_error")
-            [ mkAttr "message" m
-            , mkAttr "query" (BS.unpack q)
-            , mkAttr "params" (show p)
-            ])
-    []]
-
-queryErrorXML :: QueryError -> XmlTree
-queryErrorXML (QueryError m (PT.Query q)) = mkRoot []
-  [mkTree (XTag (mkName "query_error")
-            [ mkAttr "message" m
-            , mkAttr "query" (BS.unpack q)
-            ])
-    []]
+errorXML :: Error -> XmlTree
+errorXML (EOther m) = mkError "error" [("message", m)]
+errorXML (EQuery (QueryError m (PT.Query q))) =
+  mkError "query_error" [("message", m), ("query", BS.unpack q)]
+errorXML (EFormat (FormatError m (PT.Query q) p)) =
+  mkError "format_error" $ [("message", m), ("query", BS.unpack q)]
+  ++ map ((,) "param" . BS.unpack) p
+errorXML (ESQL e) = mkError "sql_error" $
+  [ ("state", BS.unpack $ sqlState e)
+  , ("status", show $ sqlExecStatus e)
+  , ("message", BS.unpack $ sqlErrorMsg e)
+  , ("detail", BS.unpack $ sqlErrorDetail e)
+  , ("hint", BS.unpack $ sqlErrorHint e) ]
+errorXML (EResult e) = mkError "result_error" [("message", errMessage e)]
 
 serve :: EnvConfig -> IO Connection -> Application
 serve conf ioc req respond = do
   form' <- urlDecodeForm <$> strictRequestBody req
   case form' of
-    Left _err -> respond $ responseLBS notAcceptable406 []
-      "Failed to read form data"
+    Left err -> respError notAcceptable406 $ EOther $
+      "Failed to read form data:" ++ T.unpack err
     Right form -> case lookup "q" (queryString req) of
       Just (Just q) -> do
-        let qs = queryString req
-            (q', params) = prepareQuery form qs q
-            xsltPath = xsltDirectory conf
-                </> replaceExtension
-                (takeFileName (BS.unpack $ rawPathInfo req)) "xsl"
-            resp st xml = do
-              rc <- runX $ constA xml
-                >>> xsltApplyStylesheetWParamsFromURI (makeParams qs) xsltPath
-                >>> writeDocumentToString [withOutputXHTML, withIndent True]
-              respond $ responseLBS st
-                [(hContentType, "application/xhtml+xml")]
-                (fromString $ concat $
-                 "<?xml version=\"1.0\"?>\n" : "<!DOCTYPE html>\n" : rc)
-        flip catches [ Handler $ resp badRequest400 . sqlErrorXML q' params
-                     , Handler $ resp badRequest400 . formatErrorXML
-                     , Handler $ resp badRequest400 . queryErrorXML
-                     -- todo: handle ResultError as well
+        let (q', params) = prepareQuery form qs q
+        flip catches [ Handler $ respError badRequest400 . ESQL
+                     , Handler $ respError badRequest400 . EFormat
+                     , Handler $ respError badRequest400 . EQuery
+                     , Handler $ respError badRequest400 . EResult
                      ]
           $ bracket ioc cancelAndClose $ \c -> do
           r <- query c q' params
           case r of
             [Only xmlDoc] -> resp ok200 (unPgXmlTree xmlDoc)
-            _ -> respond $ responseLBS status500 []
-              "Expected a single result, got 0 or more"
-      _ -> respond $ responseLBS imATeapot418 [] "No query is provided"
+            _ -> respError status500
+              (EOther "Expected a single result, got 0 or more")
+      _ -> respError imATeapot418 (EOther "No query is provided")
+  where
+    qs = queryString req
+    xsltPath = xsltDirectory conf
+               </> replaceExtension
+               (takeFileName (BS.unpack $ rawPathInfo req)) "xsl"
+    resp st xml = do
+      rc <- runX $ constA xml
+            >>> xsltApplyStylesheetWParamsFromURI (makeParams qs) xsltPath
+            >>> writeDocumentToString [withOutputXHTML, withIndent True]
+      respond $ responseLBS st
+        [(hContentType, "application/xhtml+xml")]
+        (fromString $ concat $
+          "<?xml version=\"1.0\"?>\n" : "<!DOCTYPE html>\n" : rc)
+    respError st e = resp st (errorXML e)
 
 main :: IO ()
 main = do
