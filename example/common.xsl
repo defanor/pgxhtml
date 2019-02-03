@@ -8,6 +8,7 @@
   <xsl:output method="xml" indent="yes"/>
 
   <xsl:template match="/">
+    <xsl:text disable-output-escaping='yes'>&lt;!DOCTYPE html&gt;</xsl:text>
     <html xmlns="http://www.w3.org/1999/xhtml">
       <head>
         <title>Bugs</title>

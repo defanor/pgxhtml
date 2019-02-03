@@ -28,11 +28,12 @@ HTTP basic authentication and PostgreSQL roles for authentication.
 -}
 
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 
 import qualified Data.ByteString.Char8 as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Lazy as HM
 import qualified Data.Text as T
-import qualified Data.Map.Lazy as M
 import qualified Database.PostgreSQL.Simple.Types as PT
 import Database.PostgreSQL.Simple
 import Network.Wai
@@ -43,15 +44,6 @@ import Web.FormUrlEncoded (Form(..), urlDecodeForm)
 import Database.PostgreSQL.Simple.ToField (Action (..))
 import Database.PostgreSQL.Simple.Internal (withConnection)
 import Database.PostgreSQL.LibPQ (getCancel, cancel)
-import Text.XML.HXT.Core
-  (IOSArrow, replaceChildren, arrL, ($<), constA, runX,
-   writeDocumentToString, withOutputXHTML, withIndent, stringTrim, mkQName)
-import Text.XML.HXT.DOM.XmlNode (mkRoot, mkElement, mkText)
-import Text.XML.HXT.Parser.XmlParsec (xreadDoc)
-import Text.XML.HXT.XSLT.Application (XPathParams, applyStylesheetWParams)
-import Text.XML.HXT.XSLT.XsltArrows (xsltCompileStylesheetFromURI)
-import Text.XML.HXT.XSLT.Common (XmlTree, ExName(..), Expr(..), (>>>))
-import Data.String (fromString)
 import Data.Maybe (mapMaybe)
 import Data.Text.Encoding (encodeUtf8)
 import Network.Wai.Middleware.HttpAuth (extractBasicAuth)
@@ -63,18 +55,80 @@ import Control.Arrow ((***))
 import Control.Exception (bracket, finally, catches, Handler(..))
 import System.FilePath (replaceExtension, takeFileName, (</>))
 import System.Envy (decodeEnv, FromEnv(..), envMaybe, (.!=))
+import Foreign
+import Foreign.C
 
-newtype PgXmlTree = PgXmlTree { unPgXmlTree :: XmlTree }
 
-instance FromField PgXmlTree where
+data XmlDoc
+data XmlSaveCtxt
+data XsltStylesheet
+data XsltTransformContext
+
+foreign import ccall "xmlReadMemory" xmlReadMemory ::
+  CString -> CInt -> CString -> CString -> CInt -> IO (Ptr XmlDoc)
+foreign import ccall "xmlFreeDoc" xmlFreeDoc :: Ptr XmlDoc -> IO ()
+foreign import ccall "xsltParseStylesheetFile" xsltParseStylesheetFile ::
+  CString -> IO (Ptr XsltStylesheet)
+foreign import ccall "xsltFreeStylesheet" xsltFreeStylesheet ::
+  Ptr XsltStylesheet -> IO ()
+foreign import ccall "xsltNewTransformContext" xsltNewTransformContext ::
+  Ptr XsltStylesheet -> Ptr XmlDoc -> IO (Ptr XsltTransformContext)
+foreign import ccall "xsltFreeTransformContext" xsltFreeTransformContext ::
+  Ptr XsltTransformContext -> IO ()
+foreign import ccall "xsltQuoteUserParams" xsltQuoteUserParams ::
+  Ptr XsltTransformContext -> Ptr CString -> IO CInt
+foreign import ccall "xsltApplyStylesheetUser" xsltApplyStylesheetUser ::
+  Ptr XsltStylesheet -> Ptr XmlDoc -> Ptr CString -> CString -> Ptr () ->
+  Ptr XsltTransformContext -> IO (Ptr XmlDoc)
+foreign import ccall "xsltSaveResultToString" xsltSaveResultToString ::
+  Ptr CString -> Ptr CInt -> Ptr XmlDoc -> Ptr XsltStylesheet -> IO CInt
+foreign import ccall "exsltRegisterAll" exsltRegisterAll :: IO ()
+
+transform :: BS.ByteString
+          -- ^ document
+          -> String
+          -- ^ base URI
+          -> FilePath
+          -- ^ path to stylesheet
+          -> [(String, String)]
+          -- ^ string params
+          -> IO BS.ByteString
+transform docBS baseStr pathStr stringParams =
+  BS.useAsCStringLen docBS $ \(docCStr, docCStrLen) ->
+  withCString baseStr $ \baseCStr ->
+  withCString pathStr $ \pathCStr ->
+  alloca $ \bufPtr ->
+  alloca $ \lenPtr ->
+  bracket (notNull $ xmlReadMemory docCStr (fromIntegral docCStrLen) baseCStr nullPtr 0)
+  xmlFreeDoc $ \doc ->
+  bracket (mapM newCString (concatMap (\(x, y) -> [x, y]) stringParams))
+  (mapM free) $ \params ->
+  withArray0 nullPtr params $ \paramsArr ->
+  withArray0 nullPtr [] $ \emptyArr ->
+  bracket (notNull $ xsltParseStylesheetFile pathCStr) xsltFreeStylesheet $ \stylesheet ->
+  bracket (notNull $ xsltNewTransformContext stylesheet doc) xsltFreeTransformContext $
+  \tc -> xsltQuoteUserParams tc paramsArr >>
+  (bracket (notNull $ xsltApplyStylesheetUser stylesheet doc emptyArr nullPtr nullPtr tc)
+    xmlFreeDoc $ \res ->
+      xsltSaveResultToString bufPtr lenPtr res stylesheet >>
+      bracket (peek bufPtr) free BS.packCString)
+  where
+    notNull :: IO (Ptr a) -> IO (Ptr a)
+    notNull a = a >>= \p -> if p == nullPtr
+                            then error "Unexpected NULL pointer"
+                            else pure p
+  -- TODO: improve error handling
+
+newtype PgXmlString = PgXmlString { unPgXmlString :: BS.ByteString }
+
+instance FromField PgXmlString where
   fromField f Nothing = returnError UnexpectedNull f ""
   fromField f (Just mdata) = do
     tName <- typename f
     if tName /= "xml"
       then returnError ConversionFailed f $
            "Expected xml type, got " ++ BS.unpack tName
-      else pure $ PgXmlTree $
-           mkRoot [] $ xreadDoc (stringTrim $ BS.unpack mdata)
+      else pure $ PgXmlString mdata
 
 data EnvConfig = EnvConfig
   { connectionTimeout :: Int
@@ -97,12 +151,6 @@ formToFields :: Form -> [(T.Text, T.Text)]
 formToFields = mapMaybe toField . HM.toList . unForm
   where toField (f, [v]) = Just (f, v)
         toField _ = Nothing
-
-xsltApplyStylesheetWParamsFromURI :: XPathParams -> String
-                                  -> IOSArrow XmlTree XmlTree
-xsltApplyStylesheetWParamsFromURI par uri = replaceChildren
-      $ arrL . applyStylesheetWParams par
-      $< (constA uri >>> xsltCompileStylesheetFromURI)
 
 cancelAndClose :: Connection -> IO (Maybe BS.ByteString)
 cancelAndClose c = cancelConn `finally` close c
@@ -137,33 +185,31 @@ prepareQuery f gq q = let sub = map substWord $ BS.words q
       ("q:", fieldName) -> ("?", pure . Escape <$> join (lookup fieldName gq))
       _ -> (other, Nothing)
 
-makeParams :: HT.Query -> XPathParams
-makeParams = M.fromList . mapMaybe makeParam
-  where makeParam (k, Just v) = Just ( ExName (BS.unpack k) ""
-                                     , LiteralExpr (BS.unpack v))
+makeParams :: HT.Query -> [(String, String)]
+makeParams = mapMaybe makeParam
+  where makeParam (k, Just v) = Just (BS.unpack k, BS.unpack v)
         makeParam _ = Nothing
 
-mkError :: String -> [(String, String)] -> XmlTree
-mkError t kv = mkRoot [] . pure $
-  mkElement (mkQName "px" t nsURI) [] $
-  map (\(k,v) -> mkElement (mkQName "px" k nsURI) [] [mkText v]) kv
+mkError :: BS.ByteString -> [(BS.ByteString, BS.ByteString)] -> BS.ByteString
+mkError t kv = xmlElem t " xmlns=\"urn:x-pgxhtml\"" $
+  BS.concat $ map (\(k,v) -> xmlElem k "" v) kv
   where
-    nsURI = "urn:x-pgxhtml"
+    xmlElem n a s = BS.concat ["<", n, a, ">", s, "</", n, ">"]
 
-errorXML :: Error -> XmlTree
-errorXML (EOther m) = mkError "error" [("message", m)]
+errorXML :: Error -> BS.ByteString
+errorXML (EOther m) = mkError "error" [("message", BS.pack m)]
 errorXML (EQuery (QueryError m (PT.Query q))) =
-  mkError "query_error" [("message", m), ("query", BS.unpack q)]
+  mkError "query_error" [("message", BS.pack m), ("query", q)]
 errorXML (EFormat (FormatError m (PT.Query q) p)) =
-  mkError "format_error" $ [("message", m), ("query", BS.unpack q)]
-  ++ map ((,) "param" . BS.unpack) p
+  mkError "format_error" $ [("message", BS.pack m), ("query", q)]
+  ++ map ((,) "param") p
 errorXML (ESQL e) = mkError "sql_error" $
-  [ ("state", BS.unpack $ sqlState e)
-  , ("status", show $ sqlExecStatus e)
-  , ("message", BS.unpack $ sqlErrorMsg e)
-  , ("detail", BS.unpack $ sqlErrorDetail e)
-  , ("hint", BS.unpack $ sqlErrorHint e) ]
-errorXML (EResult e) = mkError "result_error" [("message", errMessage e)]
+  [ ("state", sqlState e)
+  , ("status", BS.pack $ show $ sqlExecStatus e)
+  , ("message", sqlErrorMsg e)
+  , ("detail", sqlErrorDetail e)
+  , ("hint", sqlErrorHint e) ]
+errorXML (EResult e) = mkError "result_error" [("message", BS.pack $ errMessage e)]
 
 serve :: EnvConfig -> IO Connection -> Application
 serve conf ioc req respond = do
@@ -182,7 +228,7 @@ serve conf ioc req respond = do
           $ bracket ioc cancelAndClose $ \c -> do
           r <- query c q' params
           case r of
-            [Only xmlDoc] -> resp ok200 (unPgXmlTree xmlDoc)
+            [Only xmlDoc] -> resp ok200 (unPgXmlString xmlDoc)
             _ -> respError status500
               (EOther "Expected a single result, got 0 or more")
       _ -> respError imATeapot418 (EOther "No query is provided")
@@ -192,17 +238,15 @@ serve conf ioc req respond = do
                </> replaceExtension
                (takeFileName (BS.unpack $ rawPathInfo req)) "xsl"
     resp st xml = do
-      rc <- runX $ constA xml
-            >>> xsltApplyStylesheetWParamsFromURI (makeParams qs) xsltPath
-            >>> writeDocumentToString [withOutputXHTML, withIndent True]
+      doc <- transform xml "" xsltPath (makeParams qs)
       respond $ responseLBS st
         [(hContentType, "application/xhtml+xml")]
-        (fromString $ concat $
-          "<?xml version=\"1.0\"?>\n" : "<!DOCTYPE html>\n" : rc)
+        (BL.fromStrict doc)
     respError st e = resp st (errorXML e)
 
 main :: IO ()
 main = do
+  exsltRegisterAll
   conf <- decodeEnv
   case conf of
     Left err -> putStrLn err

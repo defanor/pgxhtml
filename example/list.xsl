@@ -2,7 +2,10 @@
 
 <xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
                 xmlns:xhtml="http://www.w3.org/1999/xhtml"
+                xmlns:bugs="urn:x-bugs"
+                xmlns:str="http://exslt.org/strings"
                 xmlns="http://www.w3.org/1999/xhtml"
+                extension-element-prefixes="str"
                 version="1.0">
   <xsl:output method="xml" indent="yes"/>
   <xsl:include href="common.xsl"/>
@@ -11,10 +14,10 @@
   <xsl:param name="limit" select="10" />
   <xsl:param name="offset" select="0" />
 
-  <xsl:template match="table">
+  <xsl:template match="bugs:table">
     <!-- Report form -->
     <h2>Report</h2>
-    <form method="post" action="view.xhtml?q=insert%20into%20bugs%20(%20:fields%20)%20values%20(%20:values%20)%20returning%20xmlelement(name%20table,xmlelement(name%20row,xmlelement(name%20id,id),xmlelement(name%20reported,reported),xmlelement(name%20reporter,reporter),xmlelement(name%20project,project),xmlelement(name%20description,description)))">
+    <form method="post" action="view.xhtml?q=insert%20into%20bugs%20(%20:fields%20)%20values%20(%20:values%20)%20returning%20xmlelement(name%20table,xmlattributes('urn:x-bugs'%20as%20xmlns),xmlelement(name%20row,xmlelement(name%20id,id),xmlelement(name%20reported,reported),xmlelement(name%20reporter,reporter),xmlelement(name%20project,project),xmlelement(name%20description,description)))">
       <dl>
         <dt><label for="report_project">Project</label></dt>
         <dd>
@@ -70,18 +73,18 @@
         <th>Project</th>
         <th>Summary</th>
       </tr>
-      <xsl:for-each select="row">
+      <xsl:for-each select="bugs:row">
         <tr>
-          <td><xsl:copy-of select="reported/text()" /></td>
-          <td><xsl:copy-of select="reporter/text()" /></td>
+          <td><xsl:copy-of select="bugs:reported/text()" /></td>
+          <td><xsl:copy-of select="bugs:reporter/text()" /></td>
           <td>
-            <a href="list.xhtml?q=select%20bug_search('{project/text()}','',{$limit},{$offset})">
-              <xsl:copy-of select="project/text()" />
+            <a href="list.xhtml?q=select%20bug_search(%20q:project%20,'',{$limit},{$offset})&amp;project={str:encode-uri(bugs:project/text(), true())}">
+              <xsl:copy-of select="bugs:project/text()" />
             </a>
           </td>
           <td>
-            <a href="view.xhtml?q=select%20query_to_xml('select%20*%20from%20bugs%20where%20id=''{id}''',false,false,'foo')">
-              <xsl:copy-of select="summary/text()" />
+            <a href="view.xhtml?q=select%20query_to_xml('select%20*%20from%20bugs%20where%20id=''{bugs:id}''',false,false,'urn:x-bugs')">
+              <xsl:copy-of select="bugs:summary/text()" />
             </a>
           </td>
         </tr>

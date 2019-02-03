@@ -30,7 +30,7 @@ as $$
     || 'where (project like ' || quote_literal('%' || proj || '%')
     || ') and (description like ' || quote_literal('%' || descr || '%')
     || ') order by reported desc limit ' || lim || ' offset ' || offs,
-    false, false, 'bugs')
+    false, false, 'urn:x-bugs')
 $$ language sql;
 
 -- Now users can be added with select and/or insert privileges,
