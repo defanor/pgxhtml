@@ -44,7 +44,7 @@ import Web.FormUrlEncoded (Form(..), urlDecodeForm)
 import Database.PostgreSQL.Simple.ToField (Action (..))
 import Database.PostgreSQL.Simple.Internal (withConnection)
 import Database.PostgreSQL.LibPQ (getCancel, cancel)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (mapMaybe, fromMaybe)
 import Data.Text.Encoding (encodeUtf8)
 import Network.Wai.Middleware.HttpAuth (extractBasicAuth)
 import Network.HTTP.Types.Header (hWWWAuthenticate)
@@ -54,7 +54,7 @@ import Control.Monad (join)
 import Control.Arrow ((***))
 import Control.Exception (bracket, finally, catches, Handler(..))
 import System.FilePath (replaceExtension, takeFileName, (</>))
-import System.Envy (decodeEnv, FromEnv(..), envMaybe, (.!=))
+import System.Environment (lookupEnv)
 import Data.List (nubBy)
 import Foreign
 import Foreign.C
@@ -132,17 +132,6 @@ instance FromField PgXmlString where
            "Expected xml type, got " ++ BS.unpack tName
       else pure $ PgXmlString mdata
 
-data EnvConfig = EnvConfig
-  { connectionTimeout :: Int
-    -- ^ HTTP connection timeout, in seconds
-  , xsltDirectory :: FilePath
-    -- ^ A directory to read XSLTs from
-  }
-
-instance FromEnv EnvConfig where
-  fromEnv =
-    EnvConfig <$> envMaybe "TIMEOUT" .!= 10 <*> envMaybe "XSLT_DIR" .!= ""
-
 data Error = ESQL SqlError
            | EFormat FormatError
            | EQuery QueryError
@@ -213,8 +202,8 @@ errorXML (ESQL e) = mkError "sql_error"
   , ("hint", sqlErrorHint e) ]
 errorXML (EResult e) = mkError "result_error" [("message", BS.pack $ errMessage e)]
 
-serve :: EnvConfig -> IO Connection -> Application
-serve conf ioc req respond = do
+serve :: FilePath -> IO Connection -> Application
+serve xsltDirectory ioc req respond = do
   form' <- urlDecodeForm <$> strictRequestBody req
   case form' of
     Left err -> respError notAcceptable406 $ EOther $
@@ -236,7 +225,7 @@ serve conf ioc req respond = do
       _ -> respError imATeapot418 (EOther "No query is provided")
   where
     qs = queryString req
-    xsltPath = xsltDirectory conf
+    xsltPath = xsltDirectory
                </> replaceExtension
                (takeFileName (BS.unpack $ rawPathInfo req)) "xsl"
     resp st xml = do
@@ -249,20 +238,19 @@ serve conf ioc req respond = do
 main :: IO ()
 main = do
   exsltRegisterAll
-  conf <- decodeEnv
-  case conf of
-    Left err -> putStrLn err
-    Right conf' -> run $ \req respond ->
-      maybe (respond $ responseLBS status504 [] "") pure =<<
-      timeout (connectionTimeout conf' * 10 ^ (6 :: Int))
-      (case ("authorised" `elem` pathInfo req, extractBasicAuth
-              =<< lookup hAuthorization (requestHeaders req)) of
-          (True, Just (l, p)) ->
-            serve conf'
-            (connect $ ConnectInfo "" 0 (BS.unpack l) (BS.unpack p) "")
-            req respond
-          (True, Nothing) ->
-            respond $ responseLBS unauthorized401
-            [( hWWWAuthenticate
-             , "Basic realm=\"Protected area\", charset=\"UTF-8\"")] ""
-          _ -> serve conf' (connectPostgreSQL "") req respond)
+  xsltDir <- fromMaybe "." <$> lookupEnv "XSLT_DIR"
+  to <- maybe 10 read <$> lookupEnv "TIMEOUT"
+  run $ \req respond ->
+    maybe (respond $ responseLBS status504 [] "") pure =<<
+    timeout (to * 10 ^ (6 :: Int))
+    (case ("authorised" `elem` pathInfo req, extractBasicAuth
+            =<< lookup hAuthorization (requestHeaders req)) of
+        (True, Just (l, p)) ->
+          serve xsltDir
+          (connect $ ConnectInfo "" 0 (BS.unpack l) (BS.unpack p) "")
+          req respond
+        (True, Nothing) ->
+          respond $ responseLBS unauthorized401
+          [( hWWWAuthenticate
+           , "Basic realm=\"Protected area\", charset=\"UTF-8\"")] ""
+        _ -> serve xsltDir (connectPostgreSQL "") req respond)
