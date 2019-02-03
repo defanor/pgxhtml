@@ -48,7 +48,7 @@ import Data.Maybe (mapMaybe)
 import Data.Text.Encoding (encodeUtf8)
 import Network.Wai.Middleware.HttpAuth (extractBasicAuth)
 import Network.HTTP.Types.Header (hWWWAuthenticate)
-import Network.Wai.Middleware.Timeout (timeout)
+import System.Timeout (timeout)
 import Network.Wai.Handler.FastCGI (run)
 import Control.Monad (join)
 import Control.Arrow ((***))
@@ -252,16 +252,17 @@ main = do
   conf <- decodeEnv
   case conf of
     Left err -> putStrLn err
-    Right conf' -> run
-      $ timeout (connectionTimeout conf') $ \req respond ->
-      case ("authorised" `elem` pathInfo req, extractBasicAuth
-             =<< lookup hAuthorization (requestHeaders req)) of
-        (True, Just (l, p)) ->
-          serve conf'
-          (connect $ ConnectInfo "" 0 (BS.unpack l) (BS.unpack p) "")
-          req respond
-        (True, Nothing) ->
-          respond $ responseLBS unauthorized401
-          [( hWWWAuthenticate
-           , "Basic realm=\"Protected area\", charset=\"UTF-8\"")] ""
-        _ -> serve conf' (connectPostgreSQL "") req respond
+    Right conf' -> run $ \req respond ->
+      maybe (respond $ responseLBS status504 [] "") pure =<<
+      timeout (connectionTimeout conf' * 10 ^ (6 :: Int))
+      (case ("authorised" `elem` pathInfo req, extractBasicAuth
+              =<< lookup hAuthorization (requestHeaders req)) of
+          (True, Just (l, p)) ->
+            serve conf'
+            (connect $ ConnectInfo "" 0 (BS.unpack l) (BS.unpack p) "")
+            req respond
+          (True, Nothing) ->
+            respond $ responseLBS unauthorized401
+            [( hWWWAuthenticate
+             , "Basic realm=\"Protected area\", charset=\"UTF-8\"")] ""
+          _ -> serve conf' (connectPostgreSQL "") req respond)
