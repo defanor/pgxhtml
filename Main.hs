@@ -55,6 +55,7 @@ import Control.Arrow ((***))
 import Control.Exception (bracket, finally, catches, Handler(..))
 import System.FilePath (replaceExtension, takeFileName, (</>))
 import System.Envy (decodeEnv, FromEnv(..), envMaybe, (.!=))
+import Data.List (nubBy)
 import Foreign
 import Foreign.C
 
@@ -101,7 +102,8 @@ transform docBS baseStr pathStr stringParams =
   alloca $ \lenPtr ->
   bracket (notNull $ xmlReadMemory docCStr (fromIntegral docCStrLen) baseCStr nullPtr 0)
   xmlFreeDoc $ \doc ->
-  bracket (mapM newCString (concatMap (\(x, y) -> [x, y]) stringParams))
+  bracket (mapM newCString (concatMap (\(x, y) -> [x, y]) $
+                            nubBy (\x y -> fst x == fst y) stringParams))
   (mapM free) $ \params ->
   withArray0 nullPtr params $ \paramsArr ->
   withArray0 nullPtr [] $ \emptyArr ->
