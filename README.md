@@ -16,16 +16,14 @@ Request timeouts are enforced and do cancel DB queries, but otherwise
 it relies on PostgreSQL for access permissions and security policies,
 as well as for any business logic that may be needed.
 
-It is based on WAI, and can be used with (S,Fast)CGI, or various other
-methods.
+FastCGI is used.
 
 
 ## Usage
 
 ### Invocation
 
-See [wai-cli](https://hackage.haskell.org/package/wai-cli) for CLI
-arguments. The used environment variables are:
+The used environment variables are:
 
 - `TIMEOUT`: request timeout in seconds, 10 by default.
 - `XSLT_DIR`: a directory to read XSLT files from, current working
@@ -91,6 +89,9 @@ pgxhtml only focuses on providing a web interface to a database.
   PUBLIC](https://www.postgresql.org/docs/current/ddl-schemas.html)
   would likely be desired (perhaps granting `CREATE` just to the
   database owner/administrators).
+
+- Possibly web server rules (such as nginx rewrites), if it's desired
+  to strictly limit available queries.
 
 ## See also
 

@@ -14,5 +14,20 @@ them.
 
 `list.xsl` includes report and search forms, and lists the bugs.
 
-To quickly try it, run `pgxhtml --devlogging` in this directory,
-with database connection environment variables set if needed.
+To quickly try it, run `spawn-fcgi -p 5152 /bin/env pgxhtml` in this
+directory, with database connection environment variables set if
+needed, an `127.0.0.1 pgxhtml-test` entry in `/etc/hosts`, and a nginx
+config akin to the following:
+
+```
+server {
+    listen localhost:80;
+    server_name pgxhtml-test;
+
+    location / {
+      include fastcgi_params;
+      fastcgi_param PATH_INFO $fastcgi_script_name;
+      fastcgi_pass 127.0.0.1:5152;
+    }
+}
+```

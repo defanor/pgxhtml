@@ -49,7 +49,7 @@ import Data.Text.Encoding (encodeUtf8)
 import Network.Wai.Middleware.HttpAuth (extractBasicAuth)
 import Network.HTTP.Types.Header (hWWWAuthenticate)
 import Network.Wai.Middleware.Timeout (timeout)
-import Network.Wai.Cli (defWaiMain)
+import Network.Wai.Handler.FastCGI (run)
 import Control.Monad (join)
 import Control.Arrow ((***))
 import Control.Exception (bracket, finally, catches, Handler(..))
@@ -250,7 +250,7 @@ main = do
   conf <- decodeEnv
   case conf of
     Left err -> putStrLn err
-    Right conf' -> defWaiMain
+    Right conf' -> run
       $ timeout (connectionTimeout conf') $ \req respond ->
       case ("authorised" `elem` pathInfo req, extractBasicAuth
              =<< lookup hAuthorization (requestHeaders req)) of
