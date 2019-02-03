@@ -108,10 +108,10 @@ transform docBS baseStr pathStr stringParams =
   bracket (notNull $ xsltParseStylesheetFile pathCStr) xsltFreeStylesheet $ \stylesheet ->
   bracket (notNull $ xsltNewTransformContext stylesheet doc) xsltFreeTransformContext $
   \tc -> xsltQuoteUserParams tc paramsArr >>
-  (bracket (notNull $ xsltApplyStylesheetUser stylesheet doc emptyArr nullPtr nullPtr tc)
-    xmlFreeDoc $ \res ->
-      xsltSaveResultToString bufPtr lenPtr res stylesheet >>
-      bracket (peek bufPtr) free BS.packCString)
+  bracket (notNull $ xsltApplyStylesheetUser stylesheet doc emptyArr nullPtr nullPtr tc)
+  xmlFreeDoc (\res ->
+                xsltSaveResultToString bufPtr lenPtr res stylesheet >>
+                bracket (peek bufPtr) free BS.packCString)
   where
     notNull :: IO (Ptr a) -> IO (Ptr a)
     notNull a = a >>= \p -> if p == nullPtr
@@ -203,7 +203,7 @@ errorXML (EQuery (QueryError m (PT.Query q))) =
 errorXML (EFormat (FormatError m (PT.Query q) p)) =
   mkError "format_error" $ [("message", BS.pack m), ("query", q)]
   ++ map ((,) "param") p
-errorXML (ESQL e) = mkError "sql_error" $
+errorXML (ESQL e) = mkError "sql_error"
   [ ("state", sqlState e)
   , ("status", BS.pack $ show $ sqlExecStatus e)
   , ("message", sqlErrorMsg e)
