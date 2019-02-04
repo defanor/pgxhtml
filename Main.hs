@@ -34,17 +34,14 @@ import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Lazy as HM
 import qualified Data.Text as T
-import qualified Database.PostgreSQL.Simple.Types as PT
-import Database.PostgreSQL.Simple
 import Network.Wai
 import Network.HTTP.Types as HT
-import Database.PostgreSQL.Simple.FromField
-  (FromField, fromField, returnError, typename)
 import Web.FormUrlEncoded (Form(..), urlDecodeForm)
-import Database.PostgreSQL.Simple.ToField (Action (..))
-import Database.PostgreSQL.Simple.Internal (withConnection)
-import Database.PostgreSQL.LibPQ (getCancel, cancel)
-import Data.Maybe (mapMaybe, fromMaybe)
+import Database.PostgreSQL.LibPQ
+  (getCancel, cancel, connectdb, finish, execParams, getvalue, invalidOid,
+   escapeIdentifier, resultStatus, errorMessage, Connection, Format(..),
+   ExecStatus(..))
+import Data.Maybe (mapMaybe, fromMaybe, catMaybes)
 import Data.Text.Encoding (encodeUtf8)
 import Network.Wai.Middleware.HttpAuth (extractBasicAuth)
 import Network.HTTP.Types.Header (hWWWAuthenticate)
@@ -52,7 +49,7 @@ import System.Timeout (timeout)
 import Network.Wai.Handler.FastCGI (run)
 import Control.Monad (join)
 import Control.Arrow ((***))
-import Control.Exception (bracket, finally, catches, Handler(..))
+import Control.Exception (bracket, finally)
 import System.FilePath (replaceExtension, takeFileName, (</>))
 import System.Environment (lookupEnv)
 import Data.List (nubBy)
@@ -60,8 +57,9 @@ import Foreign
 import Foreign.C
 
 
+-- * libxml bindings and functions
+
 data XmlDoc
-data XmlSaveCtxt
 data XsltStylesheet
 data XsltTransformContext
 
@@ -100,20 +98,25 @@ transform docBS baseStr pathStr stringParams =
   withCString pathStr $ \pathCStr ->
   alloca $ \bufPtr ->
   alloca $ \lenPtr ->
-  bracket (notNull $ xmlReadMemory docCStr (fromIntegral docCStrLen) baseCStr nullPtr 0)
+  bracket
+  (notNull $ xmlReadMemory docCStr (fromIntegral docCStrLen) baseCStr nullPtr 0)
   xmlFreeDoc $ \doc ->
   bracket (mapM newCString (concatMap (\(x, y) -> [x, y]) $
                             nubBy (\x y -> fst x == fst y) stringParams))
   (mapM free) $ \params ->
   withArray0 nullPtr params $ \paramsArr ->
   withArray0 nullPtr [] $ \emptyArr ->
-  bracket (notNull $ xsltParseStylesheetFile pathCStr) xsltFreeStylesheet $ \stylesheet ->
-  bracket (notNull $ xsltNewTransformContext stylesheet doc) xsltFreeTransformContext $
+  bracket (notNull $ xsltParseStylesheetFile pathCStr) xsltFreeStylesheet $
+  \stylesheet ->
+  bracket (notNull $ xsltNewTransformContext stylesheet doc)
+  xsltFreeTransformContext $
   \tc -> xsltQuoteUserParams tc paramsArr >>
-  bracket (notNull $ xsltApplyStylesheetUser stylesheet doc emptyArr nullPtr nullPtr tc)
-  xmlFreeDoc (\res ->
-                xsltSaveResultToString bufPtr lenPtr res stylesheet >>
-                bracket (peek bufPtr) free BS.packCString)
+  bracket
+  (notNull $ xsltApplyStylesheetUser stylesheet doc emptyArr nullPtr nullPtr tc)
+  xmlFreeDoc
+  (\res ->
+      xsltSaveResultToString bufPtr lenPtr res stylesheet >>
+      bracket (peek bufPtr) free BS.packCString)
   where
     notNull :: IO (Ptr a) -> IO (Ptr a)
     notNull a = a >>= \p -> if p == nullPtr
@@ -121,22 +124,64 @@ transform docBS baseStr pathStr stringParams =
                             else pure p
   -- TODO: improve error handling
 
-newtype PgXmlString = PgXmlString { unPgXmlString :: BS.ByteString }
 
-instance FromField PgXmlString where
-  fromField f Nothing = returnError UnexpectedNull f ""
-  fromField f (Just mdata) = do
-    tName <- typename f
-    if tName /= "xml"
-      then returnError ConversionFailed f $
-           "Expected xml type, got " ++ BS.unpack tName
-      else pure $ PgXmlString mdata
+-- * PostgreSQL-related functions
 
-data Error = ESQL SqlError
-           | EFormat FormatError
-           | EQuery QueryError
-           | EResult ResultError
-           | EOther String
+connString :: [(BS.ByteString, BS.ByteString)] -> BS.ByteString
+connString [] = BS.empty
+connString ((k,v):xs) =
+  BS.concat [k, "='", BS.pack (val $ BS.unpack v), "' ", connString xs]
+  where val [] = []
+        val ('\\':cs) = '\\' : '\\' : val cs
+        val ('\'':cs) = '\\' : '\'' : val cs
+        val (c:cs) = c : val cs
+
+-- https://www.postgresql.org/docs/11/libpq-exec.html
+-- https://hackage.haskell.org/package/postgresql-libpq-0.9.4.2/docs/Database-PostgreSQL-LibPQ.html
+prepareQuery :: Connection
+             -> [(BS.ByteString, BS.ByteString)]
+             -- ^ Form data
+             -> [(BS.ByteString, Maybe BS.ByteString)]
+             -- ^ URL query
+             -> BS.ByteString
+             -- ^ SQL query template
+             -> IO (BS.ByteString, [BS.ByteString])
+             -- ^ SQL query template and parameters
+prepareQuery c f gq q = substWords [] [] $ BS.words q
+  where
+    placeholder :: Int -> BS.ByteString
+    placeholder n = BS.cons '$' $ BS.pack $ show $ n + 1
+    placeholders :: Int -> BS.ByteString
+    placeholders cnt = BS.intercalate " , "
+      [placeholder (cnt + n) | n <- [0 .. length f - 1]]
+    substWords :: [BS.ByteString]
+               -- ^ query bits
+               -> [BS.ByteString]
+               -- ^ parameters
+               -> [BS.ByteString]
+               -- ^ remaining words
+               -> IO (BS.ByteString, [BS.ByteString])
+               -- ^ query and parameters
+    substWords qs ps [] = pure (BS.unwords qs, ps)
+    substWords qs ps (":fields":rest) = do
+      identifiers <- BS.intercalate ", " . catMaybes
+                     <$> mapM (escapeIdentifier c . fst) f
+      substWords (qs ++ [identifiers]) ps rest
+    substWords qs ps (":values":rest) =
+      substWords (qs ++ [placeholders $ length ps]) (ps ++ map snd f) rest
+    substWords qs ps (other:rest) = case BS.splitAt 2 other of
+      -- POST (form) parameter
+      ("f:", fieldName) -> case lookup fieldName f of
+        Nothing -> substWords (qs ++ [other]) ps rest
+        Just v -> substWords (qs ++ [placeholder $ length ps]) (ps ++ [v]) rest
+      -- GET (query/link or form) parameter
+      ("q:", fieldName) -> case join (lookup fieldName gq) of
+        Nothing -> substWords (qs ++ [other]) ps rest
+        Just v -> substWords (qs ++ [placeholder $ length ps]) (ps ++ [v]) rest
+      _ -> substWords (qs ++ [other]) ps rest
+
+
+-- * Web interface
 
 formToFields :: Form -> [(T.Text, T.Text)]
 formToFields = mapMaybe toField . HM.toList . unForm
@@ -144,85 +189,57 @@ formToFields = mapMaybe toField . HM.toList . unForm
         toField _ = Nothing
 
 cancelAndClose :: Connection -> IO (Maybe BS.ByteString)
-cancelAndClose c = cancelConn `finally` close c
-  where cancelConn = withConnection c $ \conn -> do
-          cl <- getCancel conn
+cancelAndClose c = cancelConn `finally` finish c
+  where cancelConn = do
+          cl <- getCancel c
           case cl of
             Nothing -> pure $ Just "Failed to get a Cancel structure"
             Just cl' -> either Just (const Nothing) <$> cancel cl'
-
-prepareQuery :: Form
-             -- ^ Form data
-             -> HT.Query
-             -- ^ URL query
-             -> BS.ByteString
-             -- ^ SQL query template
-             -> (PT.Query, [Action])
-             -- ^ SQL query template and parameters
-prepareQuery f gq q = let sub = map substWord $ BS.words q
-  in (PT.Query $ BS.unwords (map fst sub), concat $ mapMaybe snd sub)
-  where
-    fields = formToFields f
-    bsFields = map (encodeUtf8 *** encodeUtf8) fields
-    keys = map fst bsFields
-    vals = map snd bsFields
-    placeholders = BS.intercalate "," (map (const "?") fields)
-    substWord ":fields" = (placeholders, Just (map EscapeIdentifier keys))
-    substWord ":values" = (placeholders, Just (map Escape vals))
-    substWord other = case BS.splitAt 2 other of
-      -- POST (form) parameter
-      ("f:", fieldName) -> ("?", pure . Escape <$> lookup fieldName bsFields)
-      -- GET (query/link or form) parameter
-      ("q:", fieldName) -> ("?", pure . Escape <$> join (lookup fieldName gq))
-      _ -> (other, Nothing)
 
 makeParams :: HT.Query -> [(String, String)]
 makeParams = mapMaybe makeParam
   where makeParam (k, Just v) = Just (BS.unpack k, BS.unpack v)
         makeParam _ = Nothing
 
-mkError :: BS.ByteString -> [(BS.ByteString, BS.ByteString)] -> BS.ByteString
-mkError t kv = xmlElem t " xmlns=\"urn:x-pgxhtml\"" $
+errorXML :: [(BS.ByteString, BS.ByteString)] -> BS.ByteString
+errorXML kv = xmlElem "error" " xmlns=\"urn:x-pgxhtml\"" $
   BS.concat $ map (\(k,v) -> xmlElem k "" v) kv
   where
     xmlElem n a s = BS.concat ["<", n, a, ">", s, "</", n, ">"]
-
-errorXML :: Error -> BS.ByteString
-errorXML (EOther m) = mkError "error" [("message", BS.pack m)]
-errorXML (EQuery (QueryError m (PT.Query q))) =
-  mkError "query_error" [("message", BS.pack m), ("query", q)]
-errorXML (EFormat (FormatError m (PT.Query q) p)) =
-  mkError "format_error" $ [("message", BS.pack m), ("query", q)]
-  ++ map ((,) "param") p
-errorXML (ESQL e) = mkError "sql_error"
-  [ ("state", sqlState e)
-  , ("status", BS.pack $ show $ sqlExecStatus e)
-  , ("message", sqlErrorMsg e)
-  , ("detail", sqlErrorDetail e)
-  , ("hint", sqlErrorHint e) ]
-errorXML (EResult e) = mkError "result_error" [("message", BS.pack $ errMessage e)]
 
 serve :: FilePath -> IO Connection -> Application
 serve xsltDirectory ioc req respond = do
   form' <- urlDecodeForm <$> strictRequestBody req
   case form' of
-    Left err -> respError notAcceptable406 $ EOther $
-      "Failed to read form data:" ++ T.unpack err
-    Right form -> case lookup "q" (queryString req) of
-      Just (Just q) -> do
-        let (q', params) = prepareQuery form qs q
-        flip catches [ Handler $ respError badRequest400 . ESQL
-                     , Handler $ respError badRequest400 . EFormat
-                     , Handler $ respError badRequest400 . EQuery
-                     , Handler $ respError badRequest400 . EResult
-                     ]
-          $ bracket ioc cancelAndClose $ \c -> do
-          r <- query c q' params
-          case r of
-            [Only xmlDoc] -> resp ok200 (unPgXmlString xmlDoc)
-            _ -> respError status500
-              (EOther "Expected a single result, got 0 or more")
-      _ -> respError imATeapot418 (EOther "No query is provided")
+    Left err -> respError notAcceptable406
+      [("message", BS.pack $ "Failed to read form data:" ++ T.unpack err)]
+    Right form -> case join $ lookup "q" $ queryString req of
+      Just q -> bracket ioc cancelAndClose $ \c -> do
+        (q', params) <- prepareQuery c
+          (map (encodeUtf8 *** encodeUtf8) $ formToFields form) qs q
+        r <- execParams c q'
+          (map (\p -> Just (invalidOid, p, Text)) params) Text
+        case r of
+          Just r' -> do
+            rs <- resultStatus r'
+            case rs of
+              TuplesOk -> do
+                -- TODO: add more checks and error messages
+                val <- getvalue r' 0 0
+                case val of
+                  Nothing -> respError status500
+                    [("message", "Failed to read query result")]
+                  Just val' -> resp ok200 val'
+              CommandOk ->
+                respError status500
+                  [("message", "The command didn't return XML")]
+              _ -> do
+                errMsg <- maybe [] (\m -> [("message", m)]) <$> errorMessage c
+                respError status500 $
+                  ("exec_status", BS.pack (show rs)) : errMsg
+          Nothing -> respError status500
+            [("message", "Failed to execute the query")]
+      _ -> respError imATeapot418 [("message", "No query is provided")]
   where
     qs = queryString req
     xsltPath = xsltDirectory
@@ -247,10 +264,10 @@ main = do
             =<< lookup hAuthorization (requestHeaders req)) of
         (True, Just (l, p)) ->
           serve xsltDir
-          (connect $ ConnectInfo "" 0 (BS.unpack l) (BS.unpack p) "")
+          (connectdb (connString [("user", l), ("password", p)]))
           req respond
         (True, Nothing) ->
           respond $ responseLBS unauthorized401
           [( hWWWAuthenticate
            , "Basic realm=\"Protected area\", charset=\"UTF-8\"")] ""
-        _ -> serve xsltDir (connectPostgreSQL "") req respond)
+        _ -> serve xsltDir (connectdb "") req respond)
