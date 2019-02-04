@@ -43,7 +43,6 @@ import Database.PostgreSQL.LibPQ
    ExecStatus(..))
 import Data.Maybe (mapMaybe, fromMaybe, catMaybes)
 import Data.Text.Encoding (encodeUtf8)
-import Network.Wai.Middleware.HttpAuth (extractBasicAuth)
 import Network.HTTP.Types.Header (hWWWAuthenticate)
 import System.Timeout (timeout)
 import Network.Wai.Handler.FastCGI (run)
@@ -53,11 +52,15 @@ import Control.Exception (bracket, finally)
 import System.FilePath (replaceExtension, takeFileName, (</>))
 import System.Environment (lookupEnv)
 import Data.List (nubBy)
+import Data.ByteString.Base64 (decodeLenient)
 import Foreign
 import Foreign.C
 
 
 -- * libxml bindings and functions
+
+-- http://xmlsoft.org/html/index.html
+-- http://xmlsoft.org/XSLT/html/index.html
 
 data XmlDoc
 data XsltStylesheet
@@ -252,6 +255,16 @@ serve xsltDirectory ioc req respond = do
         (BL.fromStrict doc)
     respError st e = resp st (errorXML e)
 
+-- https://tools.ietf.org/html/rfc7235
+-- https://tools.ietf.org/html/rfc7617
+baCredentials :: BS.ByteString -> Maybe (BS.ByteString, BS.ByteString)
+baCredentials cred = do
+  (login, password) <-
+    BS.break (== ':') . decodeLenient <$> BS.stripPrefix "Basic " cred
+  if BS.length password > 0
+    then Just (login, BS.tail password)
+    else Nothing
+
 main :: IO ()
 main = do
   exsltRegisterAll
@@ -260,7 +273,7 @@ main = do
   run $ \req respond ->
     maybe (respond $ responseLBS status504 [] "") pure =<<
     timeout (to * 10 ^ (6 :: Int))
-    (case ("authorised" `elem` pathInfo req, extractBasicAuth
+    (case ("authorised" `elem` pathInfo req, baCredentials
             =<< lookup hAuthorization (requestHeaders req)) of
         (True, Just (l, p)) ->
           serve xsltDir
