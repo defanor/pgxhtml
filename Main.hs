@@ -31,28 +31,18 @@ HTTP basic authentication and PostgreSQL roles for authentication.
 {-# LANGUAGE ForeignFunctionInterface #-}
 
 import qualified Data.ByteString.Char8 as BS
-import qualified Data.ByteString.Lazy as BL
-import qualified Data.HashMap.Lazy as HM
-import qualified Data.Text as T
-import Network.Wai
-import Network.HTTP.Types as HT
-import Web.FormUrlEncoded (Form(..), urlDecodeForm)
 import Database.PostgreSQL.LibPQ
   (getCancel, cancel, connectdb, finish, execParams, getvalue, invalidOid,
    escapeIdentifier, resultStatus, errorMessage, Connection, Format(..),
    ExecStatus(..))
-import Data.Maybe (mapMaybe, fromMaybe, catMaybes)
-import Data.Text.Encoding (encodeUtf8)
-import Network.HTTP.Types.Header (hWWWAuthenticate)
+import Data.Maybe (mapMaybe, fromMaybe, catMaybes, fromJust)
 import System.Timeout (timeout)
-import Network.Wai.Handler.FastCGI (run)
-import Control.Monad (join)
-import Control.Arrow ((***))
 import Control.Exception (bracket, finally)
-import System.FilePath (replaceExtension, takeFileName, (</>))
+import System.FilePath (takeFileName, (</>), (<.>))
 import System.Environment (lookupEnv)
 import Data.List (nubBy)
 import Data.ByteString.Base64 (decodeLenient)
+import Data.Char (ord, chr)
 import Foreign
 import Foreign.C
 
@@ -92,7 +82,7 @@ transform :: BS.ByteString
           -- ^ base URI
           -> FilePath
           -- ^ path to stylesheet
-          -> [(String, String)]
+          -> [(BS.ByteString, BS.ByteString)]
           -- ^ string params
           -> IO BS.ByteString
 transform docBS baseStr pathStr stringParams =
@@ -104,9 +94,8 @@ transform docBS baseStr pathStr stringParams =
   bracket
   (notNull $ xmlReadMemory docCStr (fromIntegral docCStrLen) baseCStr nullPtr 0)
   xmlFreeDoc $ \doc ->
-  bracket (mapM newCString (concatMap (\(x, y) -> [x, y]) $
-                            nubBy (\x y -> fst x == fst y) stringParams))
-  (mapM free) $ \params ->
+  useAsCStrings (concatMap (\(x, y) -> [x, y]) $
+                  nubBy (\x y -> fst x == fst y) stringParams) [] $ \params ->
   withArray0 nullPtr params $ \paramsArr ->
   withArray0 nullPtr [] $ \emptyArr ->
   bracket (notNull $ xsltParseStylesheetFile pathCStr) xsltFreeStylesheet $
@@ -121,6 +110,10 @@ transform docBS baseStr pathStr stringParams =
       xsltSaveResultToString bufPtr lenPtr res stylesheet >>
       bracket (peek bufPtr) free BS.packCString)
   where
+    useAsCStrings :: [BS.ByteString] -> [CString] -> ([CString] -> IO a) -> IO a
+    useAsCStrings [] a f = f a
+    useAsCStrings (x:xs) a f = BS.useAsCString x $ \x' ->
+      useAsCStrings xs (a ++ [x']) f
     notNull :: IO (Ptr a) -> IO (Ptr a)
     notNull a = a >>= \p -> if p == nullPtr
                             then error "Unexpected NULL pointer"
@@ -144,7 +137,7 @@ connString ((k,v):xs) =
 prepareQuery :: Connection
              -> [(BS.ByteString, BS.ByteString)]
              -- ^ Form data
-             -> [(BS.ByteString, Maybe BS.ByteString)]
+             -> [(BS.ByteString, BS.ByteString)]
              -- ^ URL query
              -> BS.ByteString
              -- ^ SQL query template
@@ -178,18 +171,10 @@ prepareQuery c f gq q = substWords [] [] $ BS.words q
         Nothing -> substWords (qs ++ [other]) ps rest
         Just v -> substWords (qs ++ [placeholder $ length ps]) (ps ++ [v]) rest
       -- GET (query/link or form) parameter
-      ("q:", fieldName) -> case join (lookup fieldName gq) of
+      ("q:", fieldName) -> case lookup fieldName gq of
         Nothing -> substWords (qs ++ [other]) ps rest
         Just v -> substWords (qs ++ [placeholder $ length ps]) (ps ++ [v]) rest
       _ -> substWords (qs ++ [other]) ps rest
-
-
--- * Web interface
-
-formToFields :: Form -> [(T.Text, T.Text)]
-formToFields = mapMaybe toField . HM.toList . unForm
-  where toField (f, [v]) = Just (f, v)
-        toField _ = Nothing
 
 cancelAndClose :: Connection -> IO (Maybe BS.ByteString)
 cancelAndClose c = cancelConn `finally` finish c
@@ -199,61 +184,40 @@ cancelAndClose c = cancelConn `finally` finish c
             Nothing -> pure $ Just "Failed to get a Cancel structure"
             Just cl' -> either Just (const Nothing) <$> cancel cl'
 
-makeParams :: HT.Query -> [(String, String)]
-makeParams = mapMaybe makeParam
-  where makeParam (k, Just v) = Just (BS.unpack k, BS.unpack v)
-        makeParam _ = Nothing
 
-errorXML :: [(BS.ByteString, BS.ByteString)] -> BS.ByteString
-errorXML kv = xmlElem "error" " xmlns=\"urn:x-pgxhtml\"" $
-  BS.concat $ map (\(k,v) -> xmlElem k "" v) kv
-  where
-    xmlElem n a s = BS.concat ["<", n, a, ">", s, "</", n, ">"]
+-- * CGI and HTTP utilities
 
-serve :: FilePath -> IO Connection -> Application
-serve xsltDirectory ioc req respond = do
-  form' <- urlDecodeForm <$> strictRequestBody req
-  case form' of
-    Left err -> respError notAcceptable406
-      [("message", BS.pack $ "Failed to read form data:" ++ T.unpack err)]
-    Right form -> case join $ lookup "q" $ queryString req of
-      Just q -> bracket ioc cancelAndClose $ \c -> do
-        (q', params) <- prepareQuery c
-          (map (encodeUtf8 *** encodeUtf8) $ formToFields form) qs q
-        r <- execParams c q'
-          (map (\p -> Just (invalidOid, p, Text)) params) Text
-        case r of
-          Just r' -> do
-            rs <- resultStatus r'
-            case rs of
-              TuplesOk -> do
-                -- TODO: add more checks and error messages
-                val <- getvalue r' 0 0
-                case val of
-                  Nothing -> respError status500
-                    [("message", "Failed to read query result")]
-                  Just val' -> resp ok200 val'
-              CommandOk ->
-                respError status500
-                  [("message", "The command didn't return XML")]
-              _ -> do
-                errMsg <- maybe [] (\m -> [("message", m)]) <$> errorMessage c
-                respError status500 $
-                  ("exec_status", BS.pack (show rs)) : errMsg
-          Nothing -> respError status500
-            [("message", "Failed to execute the query")]
-      _ -> respError imATeapot418 [("message", "No query is provided")]
+-- https://tools.ietf.org/html/rfc3875
+-- https://tools.ietf.org/html/rfc2396
+
+-- https://www.w3.org/TR/html5/sec-forms.html
+-- https://url.spec.whatwg.org/
+parseFormUrlencoded :: BS.ByteString -> [(BS.ByteString, BS.ByteString)]
+parseFormUrlencoded s = mapMaybe seq2nv $ BS.split '&' s
   where
-    qs = queryString req
-    xsltPath = xsltDirectory
-               </> replaceExtension
-               (takeFileName (BS.unpack $ rawPathInfo req)) "xsl"
-    resp st xml = do
-      doc <- transform xml "" xsltPath (makeParams qs)
-      respond $ responseLBS st
-        [(hContentType, "application/xhtml+xml")]
-        (BL.fromStrict doc)
-    respError st e = resp st (errorXML e)
+    seq2nv sq
+      | BS.null sq = Nothing
+      | otherwise = let (n, v') = BS.break (== '=') sq
+                        v = if BS.null v' then v' else BS.tail v'
+                    in Just (unescape n, unescape v)
+    unescape :: BS.ByteString -> BS.ByteString
+    unescape bs = case BS.uncons bs of
+      Nothing -> bs
+      Just ('+', rest) -> BS.cons ' ' (unescape rest)
+      Just ('%', rest) -> case BS.uncons rest of
+        Nothing -> BS.pack ['%']
+        Just (c1, rest') -> case BS.uncons rest' of
+          Nothing -> BS.pack ['%', c1]
+          Just (c2, rest'') -> case (parseChar c1, parseChar c2) of
+            (Just c1', Just c2') ->
+              BS.cons (chr $ c1' * 0x10 + c2') (unescape rest'')
+            _ -> BS.cons '%' (unescape rest)
+      Just (c, rest) -> BS.cons c (unescape rest)
+    parseChar :: Char -> Maybe Int
+    parseChar c
+      | c >= 'A' && c <= 'F' = Just $ ord c - ord 'A' + 10
+      | c >= '0' && c <= '9' = Just $ ord c - ord '0'
+      | otherwise = Nothing
 
 -- https://tools.ietf.org/html/rfc7235
 -- https://tools.ietf.org/html/rfc7617
@@ -265,22 +229,81 @@ baCredentials cred = do
     then Just (login, BS.tail password)
     else Nothing
 
+respond' :: Int -> [String] -> BS.ByteString -> IO ()
+respond' code headers content = do
+  putStrLn "Content-Type:application/xhtml+xml"
+  mapM_ putStrLn headers
+  putStrLn $ concat ["Status:", show code, " ", reason, "\n"]
+  BS.putStr content
+  where
+    reason = case code of
+      200 -> "OK"
+      401 -> "Unauthorized"
+      418 -> "I'm a teapot"
+      504 -> "Gateway Timeout"
+      _ -> ""
+
+respond :: Int -> BS.ByteString -> IO ()
+respond c = respond' c []
+
+
+-- * Main routines
+
+errorXML :: [(BS.ByteString, BS.ByteString)] -> BS.ByteString
+errorXML kv = xmlElem "error" " xmlns=\"urn:x-pgxhtml\"" $
+  BS.concat $ map (\(k,v) -> xmlElem k "" v) kv
+  where
+    xmlElem n a s = BS.concat ["<", n, a, ">", s, "</", n, ">"]
+
+serve :: FilePath -> IO Connection -> [(BS.ByteString, BS.ByteString)] -> IO ()
+serve xsltDirectory ioc ps = case lookup "q" ps of
+  Just q -> bracket ioc cancelAndClose $ \c -> do
+    formData <- parseFormUrlencoded <$> BS.getContents
+    (q', params) <- prepareQuery c formData ps q
+    r <- execParams c q'
+         (map (\p -> Just (invalidOid, p, Text)) params) Text
+    case r of
+      Just r' -> do
+        rs <- resultStatus r'
+        case rs of
+          TuplesOk -> do
+            -- TODO: add more checks and error messages
+            val <- getvalue r' 0 0
+            case val of
+              Nothing ->
+                respError 500 [("message", "Failed to read query result")]
+              Just val' -> resp 200 val'
+          CommandOk ->
+            respError 500 [("message", "The command didn't return XML")]
+          _ -> do
+            errMsg <- maybe [] (\m -> [("message", m)]) <$> errorMessage c
+            respError 500 $ ("exec_status", BS.pack (show rs)) : errMsg
+      Nothing -> respError 500 [("message", "Failed to execute the query")]
+  _ -> respError 418 [("message", "No query is provided")]
+  where
+    xsltPath = xsltDirectory </>
+               takeFileName (BS.unpack $ fromMaybe "default" $ lookup "t" ps)
+               <.> "xsl"
+    resp st xml = do
+      doc <- transform xml "" xsltPath ps
+      respond st doc
+    respError st e = resp st (errorXML e)
+
 main :: IO ()
 main = do
   exsltRegisterAll
+  -- It's okay to fail when not invoked properly.
+  ps <- parseFormUrlencoded . BS.pack . fromJust <$> lookupEnv "QUERY_STRING"
+  ha <- lookupEnv "HTTP_AUTHORIZATION"
   xsltDir <- fromMaybe "." <$> lookupEnv "XSLT_DIR"
   to <- maybe 10 read <$> lookupEnv "TIMEOUT"
-  run $ \req respond ->
-    maybe (respond $ responseLBS status504 [] "") pure =<<
-    timeout (to * 10 ^ (6 :: Int))
-    (case ("authorised" `elem` pathInfo req, baCredentials
-            =<< lookup hAuthorization (requestHeaders req)) of
-        (True, Just (l, p)) ->
-          serve xsltDir
-          (connectdb (connString [("user", l), ("password", p)]))
-          req respond
-        (True, Nothing) ->
-          respond $ responseLBS unauthorized401
-          [( hWWWAuthenticate
-           , "Basic realm=\"Protected area\", charset=\"UTF-8\"")] ""
-        _ -> serve xsltDir (connectdb "") req respond)
+  maybe (respond 504 "") pure =<< timeout (to * 10 ^ (6 :: Int))
+    (case (lookup "auth" ps, baCredentials =<< BS.pack <$> ha) of
+       (Just "on", Just (l, p)) ->
+         serve xsltDir (connectdb (connString [("user", l), ("password", p)]))
+         ps
+       (Just "on", Nothing) ->
+         respond' 401
+         ["WWW-Authenticate:Basic realm=\"Protected area\", charset=\"UTF-8\""]
+         ""
+       _ -> serve xsltDir (connectdb "") ps)

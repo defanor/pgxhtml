@@ -4,19 +4,18 @@ This is a tool to make custom web interfaces to PostgreSQL databases,
 using simple and standard technologies:
 
 - SQL for querying
-- XSLT for templating (translation of XML query results into XHTML)
+- XSLT for templating
 - HTML forms for user input
 - Optional HTTP basic authentication for PostgreSQL authentication
+- CGI
 
 URL query parameters are available for use from XSLTs. SQL query
-templates also can use those, as well as HTML form data submitted with
+templates can use those too, as well as HTML form data submitted with
 the POST method.
 
 Request timeouts are enforced and do cancel DB queries, but otherwise
 it relies on PostgreSQL for access permissions and security policies,
 as well as for any business logic that may be needed.
-
-FastCGI is used.
 
 
 ## Usage
@@ -41,8 +40,8 @@ of SQL queries (which are expected to return a single XML document,
 using `query_to_xml` or similar functions), or error documents (which
 contain error details) in case of an error.
 
-The XSLTs are taken from `XSLT_DIR`, using file name from the URL
-query, with its extension changed to `xsl`.
+The XSLTs are taken from `XSLT_DIR`, using file name the `t` URL query
+parameter, with added `xsl` extension.
 
 ### Querying
 
@@ -62,7 +61,7 @@ afterwards, hence some whitespace separation is needed.
 
 ### Authentication
 
-Presence of `authorised` in the URL path requires HTTP basic
+Presence of `auth=on` in the URL query requires HTTP basic
 authentication, and the provided credentials are used directly for
 PostgreSQL authentication.
 

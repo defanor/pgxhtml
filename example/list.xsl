@@ -11,13 +11,14 @@
   <xsl:include href="common.xsl"/>
   <xsl:param name="project" />
   <xsl:param name="description" />
+  <xsl:param name="auth" />
   <xsl:param name="limit" select="10" />
   <xsl:param name="offset" select="0" />
 
   <xsl:template match="bugs:table">
     <!-- Report form -->
     <h2>Report</h2>
-    <form method="post" action="view.xhtml?q=insert%20into%20bugs%20(%20:fields%20)%20values%20(%20:values%20)%20returning%20xmlelement(name%20table,xmlattributes('urn:x-bugs'%20as%20xmlns),xmlelement(name%20row,xmlelement(name%20id,id),xmlelement(name%20reported,reported),xmlelement(name%20reporter,reporter),xmlelement(name%20project,project),xmlelement(name%20description,description)))">
+    <form method="post" action="?auth={$auth}&amp;t=view&amp;q=insert%20into%20bugs%20(%20:fields%20)%20values%20(%20:values%20)%20returning%20xmlelement(name%20table,xmlattributes('urn:x-bugs'%20as%20xmlns),xmlelement(name%20row,xmlelement(name%20id,id),xmlelement(name%20reported,reported),xmlelement(name%20reporter,reporter),xmlelement(name%20project,project),xmlelement(name%20description,description)))">
       <dl>
         <dt><label for="report_project">Project</label></dt>
         <dd>
@@ -37,7 +38,7 @@
 
     <!-- Search form -->
     <h2>Search</h2>
-    <form method="get" action="list.xhtml">
+    <form method="get">
       <dl>
         <dt><label for="search_project">Project</label></dt>
         <dd>
@@ -59,6 +60,7 @@
           <input id="search_offset" type="number" name="offset" min="0"
                  value="{$offset}" />
         </dd>
+        <input type="hidden" name="t" value="list" />
         <input type="hidden" name="q"
                value="select bug_search( q:project , q:description , q:limit , q:offset )" />
       </dl>
@@ -78,12 +80,12 @@
           <td><xsl:copy-of select="bugs:reported/text()" /></td>
           <td><xsl:copy-of select="bugs:reporter/text()" /></td>
           <td>
-            <a href="list.xhtml?q=select%20bug_search(%20q:project%20,'',{$limit},{$offset})&amp;project={str:encode-uri(bugs:project/text(), true())}">
+            <a href="?auth={$auth}&amp;t=list&amp;q=select%20bug_search(%20q:project%20,'',{$limit},{$offset})&amp;project={str:encode-uri(bugs:project/text(), true())}">
               <xsl:copy-of select="bugs:project/text()" />
             </a>
           </td>
           <td>
-            <a href="view.xhtml?q=select%20query_to_xml('select%20*%20from%20bugs%20where%20id=''{bugs:id}''',false,false,'urn:x-bugs')">
+            <a href="?auth={$auth}&amp;t=view&amp;q=select%20query_to_xml('select%20*%20from%20bugs%20where%20id=''{bugs:id}''',false,false,'urn:x-bugs')">
               <xsl:copy-of select="bugs:summary/text()" />
             </a>
           </td>

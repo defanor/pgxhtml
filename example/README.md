@@ -14,10 +14,17 @@ them.
 
 `list.xsl` includes report and search forms, and lists the bugs.
 
-To quickly try it, run `spawn-fcgi -p 5152 /bin/env pgxhtml` in this
-directory, with database connection environment variables set if
-needed, an `127.0.0.1 pgxhtml-test` entry in `/etc/hosts`, and a nginx
-config akin to the following:
+To quickly try the example after preparing a database, it can be
+invoked directly in the `example` directory, e.g.:
+
+```sh
+echo | QUERY_STRING="t=list&q=select+bug_search('','',10,0)" pgxhtml
+```
+
+To try it with a web server, ensure that `fcgiwrap` is running (e.g.,
+`fcgiwrap -s 'tcp:127.0.0.1:5152'`), database connection environment
+variables are set if needed, an `127.0.0.1 pgxhtml-test` entry is in
+`/etc/hosts`, and a nginx config akin to the following is set:
 
 ```
 server {
@@ -26,8 +33,13 @@ server {
 
     location / {
       include fastcgi_params;
-      fastcgi_param PATH_INFO $fastcgi_script_name;
+      fastcgi_param SCRIPT_FILENAME /home/defanor/.cabal/bin/pgxhtml;
+      fastcgi_param FCGI_CHDIR /home/defanor/proj/haskell/pgxhtml/example/;
       fastcgi_pass 127.0.0.1:5152;
     }
 }
 ```
+
+Then
+[http://pgxhtml-test/?t=list&q=select+bug_search('','',10,0)](http://pgxhtml-test/?t=list&q=select%20bug_search(%27%27,%27%27,10,0))
+should be available.

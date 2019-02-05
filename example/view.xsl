@@ -9,7 +9,7 @@
   <xsl:include href="common.xsl"/>
 
   <xsl:template match="bugs:table/bugs:row">
-    <a href="list.xhtml?q=select%20bug_search(%27%27,%20%27%27,%2010,%200)">back to listing</a>
+    <a href="?auth={$auth}&amp;t=list&amp;q=select%20bug_search(%27%27,%20%27%27,%2010,%200)">back to listing</a>
     <dl>
       <dt>ID</dt>
       <dd><xsl:copy-of select="bugs:id/text()" /></dd>
