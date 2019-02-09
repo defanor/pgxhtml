@@ -30,6 +30,8 @@ HTTP basic authentication and PostgreSQL roles for authentication.
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 
+#include <libxslt/xsltInternals.h>
+
 import qualified Data.ByteString.Char8 as BS
 import Database.PostgreSQL.LibPQ
   (getCancel, cancel, connectdb, finish, execParams, getvalue, invalidOid,
@@ -84,7 +86,7 @@ transform :: BS.ByteString
           -- ^ path to stylesheet
           -> [(BS.ByteString, BS.ByteString)]
           -- ^ string params
-          -> IO BS.ByteString
+          -> IO (BS.ByteString, Maybe BS.ByteString)
 transform docBS baseStr pathStr stringParams =
   BS.useAsCStringLen docBS $ \(docCStr, docCStrLen) ->
   withCString baseStr $ \baseCStr ->
@@ -106,9 +108,12 @@ transform docBS baseStr pathStr stringParams =
   bracket
   (notNull $ xsltApplyStylesheetUser stylesheet doc emptyArr nullPtr nullPtr tc)
   xmlFreeDoc
-  (\res ->
-      xsltSaveResultToString bufPtr lenPtr res stylesheet >>
-      bracket (peek bufPtr) free BS.packCString)
+  (\res -> do
+      xsltSaveResultToString bufPtr lenPtr res stylesheet
+      bracket (peek bufPtr) free $ \resultCStr -> do
+        resultBS <- BS.packCString resultCStr
+        mt <- mediaType stylesheet
+        pure (resultBS, mt))
   where
     useAsCStrings :: [BS.ByteString] -> [CString] -> ([CString] -> IO a) -> IO a
     useAsCStrings [] a f = f a
@@ -118,6 +123,12 @@ transform docBS baseStr pathStr stringParams =
     notNull a = a >>= \p -> if p == nullPtr
                             then error "Unexpected NULL pointer"
                             else pure p
+    mediaType :: Ptr XsltStylesheet -> IO (Maybe BS.ByteString)
+    mediaType pXslt = do
+      mt <- (#peek xsltStylesheet, mediaType) pXslt
+      if mt == nullPtr
+        then pure Nothing
+        else Just <$> BS.packCString mt
   -- TODO: improve error handling
 
 
@@ -231,7 +242,6 @@ baCredentials cred = do
 
 respond' :: Int -> [String] -> BS.ByteString -> IO ()
 respond' code headers content = do
-  putStrLn "Content-Type:application/xhtml+xml"
   mapM_ putStrLn headers
   putStrLn $ concat ["Status:", show code, " ", reason, "\n"]
   BS.putStr content
@@ -285,7 +295,9 @@ serve xsltDirectory ioc ps = case lookup "q" ps of
                takeFileName (BS.unpack $ fromMaybe "default" $ lookup "t" ps)
                <.> "xsl"
     resp st xml = do
-      doc <- transform xml "" xsltPath ps
+      (doc, mt) <- transform xml "" xsltPath ps
+      BS.putStrLn $ BS.append "Content-Type:" $
+        fromMaybe "application/xhtml+xml" mt
       respond st doc
     respError st e = resp st (errorXML e)
 
