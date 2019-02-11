@@ -1,6 +1,7 @@
 # pg×html
 
-This is a tool to make custom web interfaces to PostgreSQL databases,
+This is a tool to make custom web interfaces to PostgreSQL databases
+(aka [dynamic websites](https://defanor.uberspace.net/notes/dynamic-websites.xhtml)),
 using simple and standard technologies:
 
 - SQL for querying

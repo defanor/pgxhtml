@@ -34,7 +34,7 @@ server {
     location / {
       include fastcgi_params;
       fastcgi_param SCRIPT_FILENAME /home/defanor/.cabal/bin/pgxhtml;
-      fastcgi_param FCGI_CHDIR /home/defanor/proj/haskell/pgxhtml/example/;
+      fastcgi_param XSLT_DIR /home/defanor/proj/haskell/pgxhtml/example/;
       fastcgi_pass 127.0.0.1:5152;
     }
 }
