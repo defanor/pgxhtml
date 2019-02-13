@@ -49,16 +49,21 @@ parameter, with added `xsl` extension.
 SQL queries provided in the `q` URL query parameter get executed, with
 some substitutions to handle HTML forms:
 
-- `f:<name>` for POST parameters
-- `q:<name>` for GET parameters
-- `:fields` for POST parameter names
-- `:values` for POST parameter values (in the same order as the names)
+- `f:<name>` for "POST" (serialised form data in message body)
+  parameters
+- `q:<name>` for "GET" (serialised form data in URI query) parameters
+- `:fields` for "POST" parameter names
+- `:values` for "POST" parameter values (in the same order as the
+  names)
 
 `:fields` and `:values` are unnecessary, but are provided for
 convenience of insert/upsert operations.
 
 SQL queries get tokenized by splitting into words and reassembled
 afterwards, hence some whitespace separation is needed.
+
+HTTP methods (and corresponding conventions) are currently ignored,
+since they are of little use with HTML 5 forms.
 
 ### Authentication
 
