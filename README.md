@@ -70,7 +70,7 @@ since they are of little use with HTML 5 forms.
 Presence of `auth=on` in the URL query requires HTTP basic
 authentication, and the provided credentials are used directly for
 PostgreSQL authentication. HTTP authentication also gets requested if
-a database failure was password-related.
+a database connection failure was password-related.
 
 ### Web server
 
