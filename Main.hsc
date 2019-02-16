@@ -253,6 +253,10 @@ respond' code headers content = do
 respond :: Int -> BS.ByteString -> IO ()
 respond c = respond' c []
 
+requireAuth :: IO ()
+requireAuth = respond' 401
+  ["WWW-Authenticate:Basic realm=\"Protected area\", charset=\"UTF-8\""]
+  ""
 
 -- * Main routines
 
@@ -291,7 +295,12 @@ serve xsltDirectory ioc ps = case lookup "q" ps of
                 errMsg <- maybe [] (\m -> [("message", m)]) <$> errorMessage c
                 redb 500 $ ("exec_status", BS.pack (show rs)) : errMsg
           Nothing -> redb 500 [("message", "Failed to execute the query")]
-      _ -> redb 500 [("message", "Database connection failed")]
+      _ -> do
+        pNeeded <- connectionNeedsPassword c
+        pUsed <- connectionUsedPassword c
+        if pNeeded || pUsed
+          then requireAuth
+          else redb 500 [("message", "Database connection failed")]
   _ -> respError 418 [("message", "No query is provided")]
   where
     xsltPath = xsltDirectory </>
@@ -317,8 +326,5 @@ main = do
        (Just "on", Just (l, p)) ->
          serve xsltDir (connectdb (connString [("user", l), ("password", p)]))
          ps
-       (Just "on", Nothing) ->
-         respond' 401
-         ["WWW-Authenticate:Basic realm=\"Protected area\", charset=\"UTF-8\""]
-         ""
+       (Just "on", Nothing) -> requireAuth
        _ -> serve xsltDir (connectdb "") ps)
