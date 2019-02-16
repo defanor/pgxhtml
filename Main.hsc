@@ -34,9 +34,6 @@ HTTP basic authentication and PostgreSQL roles for authentication.
 
 import qualified Data.ByteString.Char8 as BS
 import Database.PostgreSQL.LibPQ
-  (getCancel, cancel, connectdb, finish, execParams, getvalue, invalidOid,
-   escapeIdentifier, resultStatus, errorMessage, Connection, Format(..),
-   ExecStatus(..))
 import Data.Maybe (mapMaybe, fromMaybe, catMaybes, fromJust)
 import System.Timeout (timeout)
 import Control.Exception (bracket, finally)
@@ -268,27 +265,33 @@ errorXML kv = xmlElem "error" " xmlns=\"urn:x-pgxhtml\"" $
 serve :: FilePath -> IO Connection -> [(BS.ByteString, BS.ByteString)] -> IO ()
 serve xsltDirectory ioc ps = case lookup "q" ps of
   Just q -> bracket ioc cancelAndClose $ \c -> do
-    formData <- parseFormUrlencoded <$> BS.getContents
-    (q', params) <- prepareQuery c formData ps q
-    r <- execParams c q'
-         (map (\p -> Just (invalidOid, p, Text)) params) Text
-    case r of
-      Just r' -> do
-        rs <- resultStatus r'
-        case rs of
-          TuplesOk -> do
-            -- TODO: add more checks and error messages
-            val <- getvalue r' 0 0
-            case val of
-              Nothing ->
-                respError 500 [("message", "Failed to read query result")]
-              Just val' -> resp 200 val'
-          CommandOk ->
-            respError 500 [("message", "The command didn't return XML")]
-          _ -> do
-            errMsg <- maybe [] (\m -> [("message", m)]) <$> errorMessage c
-            respError 500 $ ("exec_status", BS.pack (show rs)) : errMsg
-      Nothing -> respError 500 [("message", "Failed to execute the query")]
+    let redb n e = respError n =<<
+          (maybe e (\em' -> ("db_error", em') : e) <$> errorMessage c)
+    cStatus <- status c
+    case cStatus of
+      ConnectionOk -> do
+        formData <- parseFormUrlencoded <$> BS.getContents
+        (q', params) <- prepareQuery c formData ps q
+        r <- execParams c q'
+             (map (\p -> Just (invalidOid, p, Text)) params) Text
+        case r of
+          Just r' -> do
+            rs <- resultStatus r'
+            case rs of
+              TuplesOk -> do
+                -- TODO: add more checks and error messages
+                val <- getvalue r' 0 0
+                case val of
+                  Nothing ->
+                    redb 500 [("message", "Failed to read query result")]
+                  Just val' -> resp 200 val'
+              CommandOk ->
+                redb 500 [("message", "The command didn't return XML")]
+              _ -> do
+                errMsg <- maybe [] (\m -> [("message", m)]) <$> errorMessage c
+                redb 500 $ ("exec_status", BS.pack (show rs)) : errMsg
+          Nothing -> redb 500 [("message", "Failed to execute the query")]
+      _ -> redb 500 [("message", "Database connection failed")]
   _ -> respError 418 [("message", "No query is provided")]
   where
     xsltPath = xsltDirectory </>

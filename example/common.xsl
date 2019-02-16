@@ -31,6 +31,11 @@
     <dd><pre><xsl:copy-of select="text()" /></pre></dd>
   </xsl:template>
 
+  <xsl:template match="pgx:db_error">
+    <dt>DB error message</dt>
+    <dd><pre><xsl:copy-of select="text()" /></pre></dd>
+  </xsl:template>
+
   <xsl:template match="pgx:exec_status">
     <dt>ExecStatus</dt>
     <dd><xsl:copy-of select="text()" /></dd>
