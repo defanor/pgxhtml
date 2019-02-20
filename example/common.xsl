@@ -41,4 +41,8 @@
     <dd><xsl:copy-of select="text()" /></dd>
   </xsl:template>
 
+  <xsl:template match="pgx:no_query">
+    <p>No query is provided.</p>
+  </xsl:template>
+
 </xsl:stylesheet>

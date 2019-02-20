@@ -301,7 +301,7 @@ serve xsltDirectory ioc ps = case lookup "q" ps of
         if pNeeded || pUsed
           then requireAuth
           else redb 500 [("message", "Database connection failed")]
-  _ -> respError 418 [("message", "No query is provided")]
+  _ -> resp 200 "<no_query xmlns=\"urn:x-pgxhtml\" />"
   where
     xsltPath = xsltDirectory </>
                takeFileName (BS.unpack $ fromMaybe "default" $ lookup "t" ps)
