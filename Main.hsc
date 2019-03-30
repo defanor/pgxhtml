@@ -42,6 +42,7 @@ import System.Environment (lookupEnv)
 import Data.List (nubBy)
 import Data.ByteString.Base64 (decodeLenient)
 import Data.Char (ord, chr)
+import Control.Monad (when)
 import Foreign
 import Foreign.C
 
@@ -237,9 +238,11 @@ baCredentials cred = do
     then Just (login, BS.tail password)
     else Nothing
 
-respond' :: Int -> [String] -> BS.ByteString -> IO ()
+respond' :: Int -> [BS.ByteString] -> BS.ByteString -> IO ()
 respond' code headers content = do
-  mapM_ putStrLn headers
+  mapM_ BS.putStrLn headers
+  when (code == 401) $ BS.putStrLn
+    "WWW-Authenticate:Basic realm=\"Protected area\", charset=\"UTF-8\""
   putStrLn $ concat ["Status:", show code, " ", reason, "\n"]
   BS.putStr content
   where
@@ -253,11 +256,6 @@ respond' code headers content = do
 respond :: Int -> BS.ByteString -> IO ()
 respond c = respond' c []
 
-requireAuth :: IO ()
-requireAuth = respond' 401
-  ["WWW-Authenticate:Basic realm=\"Protected area\", charset=\"UTF-8\""]
-  ""
-
 -- * Main routines
 
 errorXML :: [(BS.ByteString, BS.ByteString)] -> BS.ByteString
@@ -266,8 +264,9 @@ errorXML kv = xmlElem "error" " xmlns=\"urn:x-pgxhtml\"" $
   where
     xmlElem n a s = BS.concat ["<", n, a, ">", s, "</", n, ">"]
 
-serve :: FilePath -> IO Connection -> [(BS.ByteString, BS.ByteString)] -> IO ()
-serve xsltDirectory ioc ps = case lookup "q" ps of
+serve :: Bool -> FilePath -> IO Connection
+      -> [(BS.ByteString, BS.ByteString)] -> IO ()
+serve rAuth xsltDirectory ioc ps = case lookup "q" ps of
   Just q -> bracket ioc cancelAndClose $ \c -> do
     let redb n e = respError n =<<
           (maybe e (\em' -> ("db_error", em') : e) <$> errorMessage c)
@@ -299,7 +298,7 @@ serve xsltDirectory ioc ps = case lookup "q" ps of
         pNeeded <- connectionNeedsPassword c
         pUsed <- connectionUsedPassword c
         if pNeeded || pUsed
-          then requireAuth
+          then respond 401 ""
           else redb 500 [("message", "Database connection failed")]
   _ -> resp 200 "<no_query xmlns=\"urn:x-pgxhtml\" />"
   where
@@ -310,7 +309,7 @@ serve xsltDirectory ioc ps = case lookup "q" ps of
       (doc, mt) <- transform xml "" xsltPath ps
       BS.putStrLn $ BS.append "Content-Type:" $
         fromMaybe "application/xhtml+xml" mt
-      respond st doc
+      respond (if st == 200 && rAuth then 401 else 200) doc
     respError st e = resp st (errorXML e)
 
 main :: IO ()
@@ -324,7 +323,8 @@ main = do
   maybe (respond 504 "") pure =<< timeout (to * 10 ^ (6 :: Int))
     (case (lookup "auth" ps, baCredentials =<< BS.pack <$> ha) of
        (_, Just (l, p)) ->
-         serve xsltDir (connectdb (connString [("user", l), ("password", p)]))
-         ps
-       (Just "on", Nothing) -> requireAuth
-       _ -> serve xsltDir (connectdb "") ps)
+         serve False xsltDir
+         (connectdb (connString [("user", l), ("password", p)])) ps
+       (Just "on", Nothing) -> respond 401 ""
+       (Just "try", Nothing) -> serve True xsltDir (connectdb "") ps
+       _ -> serve False xsltDir (connectdb "") ps)

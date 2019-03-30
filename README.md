@@ -72,6 +72,9 @@ authentication, and the provided credentials are used directly for
 PostgreSQL authentication. HTTP authentication also gets requested if
 a database connection failure was password-related.
 
+With `auth=try` pgxhtml would serve pages composed using defaults if
+no credentials are provided, but with 401 status code.
+
 ### Web server
 
 This is intended to be used with an HTTP server, which would take care
