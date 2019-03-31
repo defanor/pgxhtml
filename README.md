@@ -75,6 +75,11 @@ a database connection failure was password-related.
 With `auth=try` pgxhtml would serve pages composed using defaults if
 no credentials are provided, but with 401 status code.
 
+`auth=fail` would ignore user-provided credentials and serve pages
+with 401 status code. It can be used to circumvent poor authentication
+handling by some web browsers.
+
+
 ### Web server
 
 This is intended to be used with an HTTP server, which would take care

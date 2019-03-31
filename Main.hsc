@@ -322,9 +322,10 @@ main = do
   to <- maybe 10 read <$> lookupEnv "TIMEOUT"
   maybe (respond 504 "") pure =<< timeout (to * 10 ^ (6 :: Int))
     (case (lookup "auth" ps, baCredentials =<< BS.pack <$> ha) of
+       (Just "on", Nothing) -> respond 401 ""
+       (Just "try", Nothing) -> serve True xsltDir (connectdb "") ps
+       (Just "fail", _) -> serve True xsltDir (connectdb "") ps
        (_, Just (l, p)) ->
          serve False xsltDir
          (connectdb (connString [("user", l), ("password", p)])) ps
-       (Just "on", Nothing) -> respond 401 ""
-       (Just "try", Nothing) -> serve True xsltDir (connectdb "") ps
        _ -> serve False xsltDir (connectdb "") ps)
